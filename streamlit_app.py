@@ -1,97 +1,120 @@
 import streamlit as st
 import pandas as pd
 import io
+import json
 from openai import OpenAI
 
-st.set_page_config(page_title="Helps - Curadoria de Comentários", layout="wide")
+st.set_page_config(page_title="Helps - Curadoria de Risco e Sentimento", layout="wide")
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-def classificar_comentario(descricao, comentario):
+def analisar_risco_sentimento(descricao, comentario):
     if pd.isna(comentario) or str(comentario).strip() == "":
-        return "SEM_COMENTARIO"
+        return "Baixo", "Sem comentário relevante para análise."
     descricao_texto = "" if pd.isna(descricao) else str(descricao)
     comentario_texto = str(comentario)
     prompt = (
-        "Você irá atuar como uma camada de curadoria da voz do cliente para a empresa Helps.\n"
-        "Receberá a descrição do atendimento e o comentário do cliente.\n\n"
-        "Seu objetivo é identificar apenas os comentários que exigem revisão prévia, evitando ruídos desnecessários.\n"
-        "Classifique o comentário em UMA das categorias abaixo, pensando na gravidade, tom e relevância atual:\n\n"
-        "1) CRITICO: tom muito negativo ou agressivo, reclamação forte, possível risco de imagem ou de relacionamento, problema aparentemente não resolvido.\n"
-        "2) ATENCAO: comentário negativo ou de insatisfação, mas em tom mais controlado ou com problema encaminhado/mitigado.\n"
-        "3) NEUTRO_POSITIVO: comentário neutro, elogio, sugestão leve, sem crítica relevante.\n"
-        "4) IRRELEVANTE_DESCONTEXTUALIZADO: comentário fora de contexto, pouco claro, já resolvido ou que não contribui para a leitura atual da experiência.\n"
-        "5) SEM_COMENTARIO: quando não houver texto relevante para avaliar.\n\n"
-        "Use também a descrição do atendimento apenas como apoio de contexto.\n\n"
+        "Você será um curador da voz do cliente para a empresa Helps.\n"
+        "Seu objetivo é analisar o comentário do cliente e retornar:\n"
+        "1) Um GRAU DE RISCO entre: Muito Alto, Alto, Médio, Baixo.\n"
+        "2) Uma breve explicação do sentimento do pedido, em português do Brasil, de forma objetiva e profissional.\n\n"
+        "Definições gerais:\n"
+        "- Muito Alto: tom muito agressivo, alto risco de insatisfação, menção a cancelamento, reclamação grave, possível impacto de imagem.\n"
+        "- Alto: reclamação clara, problema aparentemente não resolvido ou parcialmente resolvido, insatisfação relevante.\n"
+        "- Médio: incômodo moderado, pequena frustração, pontos de melhoria sem grande risco imediato.\n"
+        "- Baixo: elogio, comentário neutro, sugestão leve ou feedback positivo.\n\n"
+        "Use a descrição do atendimento apenas como contexto complementar.\n\n"
         f"Descrição do atendimento: {descricao_texto}\n"
         f"Comentário do cliente: {comentario_texto}\n\n"
-        "Responda apenas com UMA das opções, exatamente como escrito:\n"
-        "CRITICO, ATENCAO, NEUTRO_POSITIVO, IRRELEVANTE_DESCONTEXTUALIZADO ou SEM_COMENTARIO."
+        "Responda apenas com um JSON válido no seguinte formato:\n"
+        "{ \"grau_risco\": \"Muito Alto|Alto|Médio|Baixo\", \"explicacao\": \"texto curto explicando o sentimento\" }"
     )
     response = client.responses.create(
         model="gpt-4o-mini",
-        instructions="Você é um curador de feedback de clientes, focado em identificar quais comentários precisam de análise prévia antes de serem encaminhados para a Helps.",
+        instructions="Você é um especialista em experiência do cliente, classificando risco e explicando o sentimento de forma clara e concisa.",
         input=prompt,
-        max_output_tokens=10
+        max_output_tokens=200
     )
-    classificacao = response.output_text.strip().upper()
-    opcoes_validas = {
-        "CRITICO",
-        "ATENCAO",
-        "NEUTRO_POSITIVO",
-        "IRRELEVANTE_DESCONTEXTUALIZADO",
-        "SEM_COMENTARIO"
-    }
-    if classificacao not in opcoes_validas:
-        return "ATENCAO"
-    return classificacao
+    texto = response.output_text.strip()
+    try:
+        dados = json.loads(texto)
+        grau = str(dados.get("grau_risco", "")).strip()
+        explicacao = str(dados.get("explicacao", "")).strip()
+    except Exception:
+        grau = ""
+        explicacao = ""
+    if grau not in ["Muito Alto", "Alto", "Médio", "Baixo"]:
+        grau = "Médio"
+    if explicacao == "":
+        explicacao = "Comentário indica insatisfação moderada, recomendável acompanhamento."
+    return grau, explicacao
 
-st.title("Helps - Curadoria de Comentários (Classificação de Sentimento)")
-
-st.write(
-    "Faça upload da base NPS e gere uma nova coluna com a classificação dos comentários, "
-    "para facilitar o filtro dos casos mais críticos antes de enviar para a Helps."
+st.markdown("<h1 style='text-align: center;'>Helps - Curadoria de Risco e Sentimento</h1>", unsafe_allow_html=True)
+st.markdown(
+    "<p style='text-align: center;'>Faça o upload da base NPS, selecione as colunas e gere duas novas colunas: "
+    "<b>Grau de Risco</b> e <b>Explicação do Sentimento</b>, sem alterar o texto original do cliente.</p>",
+    unsafe_allow_html=True,
 )
+
+with st.sidebar:
+    st.header("Passos")
+    st.markdown("1. Faça upload do Excel (.xlsx)")
+    st.markdown("2. Confirme se os títulos estão corretos (linha 3 da planilha)")
+    st.markdown("3. Selecione as colunas de descrição e comentário")
+    st.markdown("4. Clique em **Gerar análise** para criar as duas novas colunas")
+    st.markdown("---")
+    st.markdown("Os dados do cliente não são alterados, apenas enriquecidos com a curadoria.")
 
 arquivo = st.file_uploader("Envie o arquivo Excel (.xlsx)", type=["xlsx", "xls"])
 
 if arquivo is not None:
     try:
-        df = pd.read_excel(arquivo, header=1)
+        df = pd.read_excel(arquivo, header=2)
     except Exception:
         arquivo.seek(0)
         df = pd.read_excel(arquivo)
 
-    st.subheader("Pré-visualização da planilha")
+    st.subheader("Pré-visualização da planilha (após considerar títulos na linha 3)")
     st.dataframe(df.head())
 
     colunas = list(df.columns)
 
     col_descricao = st.selectbox(
-        "Coluna de descrição/contexto (opcional, ajuda no entendimento do comentário)",
+        "Coluna de descrição/contexto (opcional, ajuda a entender o pedido)",
         ["(nenhuma)"] + colunas,
-        index=(colunas.index("Motivo_escolha_Nota") + 1) if "Motivo_escolha_Nota" in colunas else 0
+        index=0
     )
 
     col_comentario = st.selectbox(
-        "Coluna de comentários do cliente (texto a ser classificado)",
+        "Coluna de comentários do cliente (texto a ser analisado)",
         colunas,
-        index=colunas.index("Comentario") if "Comentario" in colunas else 0
     )
 
-    nome_col_classificacao = st.text_input(
-        "Nome da nova coluna de classificação",
-        value="classificacao_comentario"
+    nome_col_risco = st.text_input(
+        "Nome da coluna 1 (Grau de Risco)",
+        value="Grau de Risco"
     )
 
-    if st.button("Gerar coluna de classificação"):
-        if nome_col_classificacao in df.columns:
-            st.error("O nome da nova coluna já existe na planilha. Escolha outro nome.")
+    nome_col_explicacao = st.text_input(
+        "Nome da coluna 2 (Explicação do Sentimento)",
+        value="Explicação do Sentimento"
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        processar = st.button("Gerar análise de risco e sentimento", use_container_width=True)
+    with col2:
+        st.write("")
+
+    if processar:
+        if nome_col_risco in df.columns or nome_col_explicacao in df.columns:
+            st.error("O nome de uma das novas colunas já existe na planilha. Altere os nomes e tente novamente.")
             st.stop()
 
         progresso = st.progress(0)
         status_text = st.empty()
-        classificacoes = []
+        riscos = []
+        explicacoes = []
         total_linhas = len(df)
 
         for i, linha in df.iterrows():
@@ -99,17 +122,25 @@ if arquivo is not None:
             comentario_val = linha[col_comentario]
             status_text.text(f"Processando linha {i + 1} de {total_linhas}...")
             try:
-                classificacao = classificar_comentario(descricao_val, comentario_val)
+                grau, explicacao = analisar_risco_sentimento(descricao_val, comentario_val)
             except Exception:
-                classificacao = "ATENCAO"
-            classificacoes.append(classificacao)
+                grau = "Médio"
+                explicacao = "Não foi possível analisar automaticamente. Recomenda-se revisão manual."
+            riscos.append(grau)
+            explicacoes.append(explicacao)
             progresso.progress(int(((i + 1) / total_linhas) * 100))
 
         df_saida = df.copy()
-        df_saida[nome_col_classificacao] = classificacoes
+        df_saida[nome_col_risco] = riscos
+        df_saida[nome_col_explicacao] = explicacoes
 
-        st.success("Coluna de classificação gerada com sucesso.")
-        st.subheader("Pré-visualização da planilha com classificação")
+        st.success("Análise concluída com sucesso. As duas colunas foram adicionadas à base.")
+
+        st.subheader("Distribuição de Grau de Risco")
+        dist_risco = pd.Series(riscos).value_counts().reindex(["Muito Alto", "Alto", "Médio", "Baixo"]).fillna(0).astype(int)
+        st.bar_chart(dist_risco)
+
+        st.subheader("Pré-visualização da planilha com curadoria")
         st.dataframe(df_saida.head())
 
         buffer = io.BytesIO()
@@ -117,8 +148,8 @@ if arquivo is not None:
         buffer.seek(0)
 
         st.download_button(
-            label="Baixar planilha com curadoria (.xlsx)",
+            label="Baixar planilha com Grau de Risco e Explicação (.xlsx)",
             data=buffer,
-            file_name="base_helps_curadoria.xlsx",
+            file_name="base_helps_curadoria_risco_sentimento.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
