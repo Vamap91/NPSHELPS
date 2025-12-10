@@ -2,16 +2,68 @@ import streamlit as st
 import pandas as pd
 import io
 import json
+import re
 from openai import OpenAI
 
 st.set_page_config(page_title="Helps - Curadoria de Risco e Sentimento", layout="wide")
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-def analisar_risco_sentimento(descricao, comentario):
-    if pd.isna(comentario) or str(comentario).strip() == "":
+def heuristica_risco_explicacao(descricao, comentario):
+    if comentario is None:
         return "Baixo", "Sem comentário relevante para análise."
-    descricao_texto = "" if pd.isna(descricao) else str(descricao)
+    texto = str(comentario).strip()
+    if texto == "":
+        return "Baixo", "Sem comentário relevante para análise."
+    t = texto.lower()
+    palavras_muito_negativas = [
+        "péssimo", "pessimo", "horrível", "horrivel", "terrível", "terrivel",
+        "nunca mais", "absurdo", "ridículo", "ridiculo", "engan", "procon",
+        "reclame aqui", "processo", "processar", "cancelar serviço", "cancelar o serviço"
+    ]
+    palavras_negativas = [
+        "ruim", "demorado", "demora", "atraso", "demorou", "problema",
+        "insatisfeito", "insatisfação", "nao gostei", "não gostei",
+        "falta de", "demorando", "espera", "fila", "reclamação", "reclamacao"
+    ]
+    palavras_positivas = [
+        "ótimo", "otimo", "bom", "boa", "excelente", "maravilhoso",
+        "rápido", "rapido", "ágil", "agil", "cordial", "educado",
+        "perfeito", "muito bom", "muito boa", "ador", "satisfeito", "satisfatória", "satisfatoria"
+    ]
+    muito_negativo = any(p in t for p in palavras_muito_negativas)
+    negativo = any(p in t for p in palavras_negativas)
+    positivo = any(p in t for p in palavras_positivas)
+    if muito_negativo:
+        grau = "Muito Alto"
+    elif negativo and not positivo:
+        grau = "Alto"
+    elif positivo and not (negativo or muito_negativo):
+        grau = "Baixo"
+    else:
+        grau = "Médio"
+    trecho = texto
+    if len(trecho) > 160:
+        trecho = trecho[:157] + "..."
+    if grau == "Baixo":
+        sentimento = "claramente positivo ou elogioso"
+        recomendacao = "reforçar os pontos fortes e manter o padrão de atendimento."
+    elif grau == "Médio":
+        sentimento = "misto ou neutro, com possíveis pontos de melhoria"
+        recomendacao = "acompanhar, mas sem urgência imediata."
+    elif grau == "Alto":
+        sentimento = "negativo, com insatisfação relevante"
+        recomendacao = "analisar e tratar em curto prazo para evitar desgaste."
+    else:
+        sentimento = "muito negativo e crítico"
+        recomendacao = "priorizar o tratamento imediato para reduzir risco de reclamações mais graves."
+    explicacao = f"O comentário é {sentimento}. Exemplo do texto do cliente: \"{trecho}\". Recomenda-se {recomendacao}"
+    return grau, explicacao
+
+def analisar_risco_sentimento(descricao, comentario):
+    if comentario is None or str(comentario).strip() == "":
+        return "Baixo", "Sem comentário relevante para análise."
+    descricao_texto = "" if descricao is None else str(descricao)
     comentario_texto = str(comentario)
     prompt = (
         "Você será um curador da voz do cliente para a empresa Helps.\n"
@@ -23,30 +75,37 @@ def analisar_risco_sentimento(descricao, comentario):
         "- Alto: reclamação clara, problema aparentemente não resolvido ou parcialmente resolvido, insatisfação relevante.\n"
         "- Médio: incômodo moderado, pequena frustração, pontos de melhoria sem grande risco imediato.\n"
         "- Baixo: elogio, comentário neutro, sugestão leve ou feedback positivo.\n\n"
+        "Se o comentário for claramente elogioso (por exemplo, 'agendamento rápido e cordialidade no atendimento'), use GRAU DE RISCO = Baixo.\n\n"
         "Use a descrição do atendimento apenas como contexto complementar.\n\n"
         f"Descrição do atendimento: {descricao_texto}\n"
         f"Comentário do cliente: {comentario_texto}\n\n"
-        "Responda apenas com um JSON válido no seguinte formato:\n"
+        "Responda apenas com um JSON puro e válido, sem texto antes ou depois, exatamente no formato:\n"
         "{ \"grau_risco\": \"Muito Alto|Alto|Médio|Baixo\", \"explicacao\": \"texto curto explicando o sentimento\" }"
     )
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        instructions="Você é um especialista em experiência do cliente, classificando risco e explicando o sentimento de forma clara e concisa.",
-        input=prompt,
-        max_output_tokens=200
-    )
-    texto = response.output_text.strip()
     try:
-        dados = json.loads(texto)
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            instructions="Você é um especialista em experiência do cliente, classificando risco e explicando o sentimento de forma clara e concisa.",
+            input=prompt,
+            max_output_tokens=200
+        )
+        content = response.output[0].content[0].text
+        texto = content.value if hasattr(content, "value") else str(content)
+    except Exception:
+        return heuristica_risco_explicacao(descricao, comentario)
+    m = re.search(r"\{.*\}", texto, re.DOTALL)
+    if not m:
+        return heuristica_risco_explicacao(descricao, comentario)
+    try:
+        dados = json.loads(m.group(0))
         grau = str(dados.get("grau_risco", "")).strip()
         explicacao = str(dados.get("explicacao", "")).strip()
     except Exception:
-        grau = ""
-        explicacao = ""
+        return heuristica_risco_explicacao(descricao, comentario)
     if grau not in ["Muito Alto", "Alto", "Médio", "Baixo"]:
-        grau = "Médio"
+        return heuristica_risco_explicacao(descricao, comentario)
     if explicacao == "":
-        explicacao = "Comentário indica insatisfação moderada, recomendável acompanhamento."
+        return heuristica_risco_explicacao(descricao, comentario)
     return grau, explicacao
 
 st.markdown("<h1 style='text-align: center;'>Helps - Curadoria de Risco e Sentimento</h1>", unsafe_allow_html=True)
@@ -59,8 +118,8 @@ st.markdown(
 with st.sidebar:
     st.header("Passos")
     st.markdown("1. Faça upload do Excel (.xlsx)")
-    st.markdown("2. Confirme se os títulos estão corretos (linha 3 da planilha)")
-    st.markdown("3. Selecione as colunas de descrição e comentário")
+    st.markdown("2. Títulos da planilha começam na linha 3")
+    st.markdown("3. Confirme as colunas: Descricao e Comentario")
     st.markdown("4. Clique em **Gerar análise** para criar as duas novas colunas")
     st.markdown("---")
     st.markdown("Os dados do cliente não são alterados, apenas enriquecidos com a curadoria.")
@@ -72,22 +131,33 @@ if arquivo is not None:
         df = pd.read_excel(arquivo, header=2)
     except Exception:
         arquivo.seek(0)
-        df = pd.read_excel(arquivo)
+        df = pd.read_excel(arquivo, header=2)
 
-    st.subheader("Pré-visualização da planilha (após considerar títulos na linha 3)")
+    st.subheader("Pré-visualização da planilha (títulos na linha 3)")
     st.dataframe(df.head())
 
     colunas = list(df.columns)
 
+    if "Descricao" in colunas:
+        idx_desc = colunas.index("Descricao") + 1
+    else:
+        idx_desc = 0
+
     col_descricao = st.selectbox(
         "Coluna de descrição/contexto (opcional, ajuda a entender o pedido)",
         ["(nenhuma)"] + colunas,
-        index=0
+        index=idx_desc if idx_desc < len(colunas) + 1 else 0
     )
+
+    if "Comentario" in colunas:
+        idx_coment = colunas.index("Comentario")
+    else:
+        idx_coment = 0
 
     col_comentario = st.selectbox(
         "Coluna de comentários do cliente (texto a ser analisado)",
         colunas,
+        index=idx_coment if idx_coment < len(colunas) else 0
     )
 
     nome_col_risco = st.text_input(
@@ -124,8 +194,7 @@ if arquivo is not None:
             try:
                 grau, explicacao = analisar_risco_sentimento(descricao_val, comentario_val)
             except Exception:
-                grau = "Médio"
-                explicacao = "Não foi possível analisar automaticamente. Recomenda-se revisão manual."
+                grau, explicacao = heuristica_risco_explicacao(descricao_val, comentario_val)
             riscos.append(grau)
             explicacoes.append(explicacao)
             progresso.progress(int(((i + 1) / total_linhas) * 100))
